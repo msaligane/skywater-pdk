@@ -60,7 +60,7 @@ all: README.rst
 	@true
 
 
-LIBRARIES = $(notdir $(wildcard skywater-pdk/libraries/sky130_*_sc_*))
+LIBRARIES = $(sort $(notdir $(wildcard skywater-pdk/libraries/sky130_*_sc_*)))
 
 $(LIBRARIES): | $(CONDA_ENV_PYTHON)
 	@$(IN_CONDA_ENV) for V in skywater-pdk/libraries/$@/*; do \
