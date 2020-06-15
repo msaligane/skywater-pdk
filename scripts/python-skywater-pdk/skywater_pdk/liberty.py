@@ -33,6 +33,8 @@ from typing import Tuple, List, Dict
 
 from . import sizes
 
+debug = False
+
 
 class TimingType(enum.IntFlag):
     """
@@ -188,7 +190,7 @@ def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
     libname0 = None
 
     corners = {}
-    cells = set()
+    all_cells = set()
     for p in library_dir.rglob("*.lib.json"):
         if not p.is_file():
             continue
@@ -204,36 +206,53 @@ def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
 
         corner_name, corner_type = TimingType.parse(corner)
 
-        cells.add(cellname)
+        if corner_name not in corners:
+            corners[corner_name] = [corner_type, set()]
 
-        if corner_name in corners:
-            corners[corner_name] |= corner_type
-        else:
-            corners[corner_name] = corner_type
+        corners[corner_name][0] |= corner_type
+        corners[corner_name][1].add(cellname)
+        all_cells.add(cellname)
+
+    for c in corners:
+        corners[c] = (corners[c][0], list(sorted(corners[c][1])))
 
     assert corners, library_dir
-    assert cells, library_dir
+    assert all_cells, library_dir
     assert libname0, library_dir
 
-    cells = list(sorted(cells))
+    all_cells = list(sorted(all_cells))
 
     # Sanity check to make sure the corner exists for all cells.
-    for cell_with_size in cells:
-        for corner, corner_types in sorted(corners.items()):
-            for corner_type in corner_types.types:
-                fname = cell_corner_file(libname0, cell_with_size, corner, corner_type)
-                fpath = os.path.join(library_dir, fname)
-                assert os.path.exists(fpath), (fpath, corner, corner_type, corner_types)
+    for corner, (corner_types, corner_cells) in sorted(corners.items()):
+        missing = set()
+        for cell_with_size in all_cells:
+            if cell_with_size not in corner_cells:
+                missing.add(cell_with_size)
+
+        if not missing:
+            continue
+
+        print("Missing", ", ".join(missing), "from", corner, corner_types)
+
+    return libname0, corners, all_cells
+
+    for corner, (corner_types, corner_cells) in sorted(corners.items()):
+        for corner_type in corner_types.types:
+            fname = cell_corner_file(libname0, cell_with_size, corner, corner_type)
+            fpath = os.path.join(library_dir, fname)
+            if not os.path.exists(fpath) and debug:
+                print("Missing", (fpath, corner, corner_type, corner_types))
 
     timing_dir = os.path.join(library_dir, "timing")
     assert os.path.exists(timing_dir), timing_dir
-    for corner, corner_types in sorted(corners.items()):
+    for corner, (corner_types, corner_cells) in sorted(corners.items()):
         for corner_type in corner_types.types:
             fname = top_corner_file(libname0, corner, corner_type)
             fpath = os.path.join(library_dir, fname)
-            assert os.path.exists(fpath), (fpath, corner, corner_type, corner_types)
+            if not os.path.exists(fpath) and debug:
+                print("Missing", (fpath, corner, corner_type, corner_types))
 
-    return libname0, corners, cells
+    return libname0, corners, all_cells
 
 
 def remove_ccsnoise(data):
@@ -263,7 +282,6 @@ def remove_ccsnoise(data):
 
             for k in ccsn_keys:
                 del t[k]
-
 
 
 def generate(library_dir, lib, corner, ocorner_type, icorner_type, cells):
@@ -301,7 +319,7 @@ def generate(library_dir, lib, corner, ocorner_type, icorner_type, cells):
     if ocorner_type != TimingType.ccsnoise:
         remove_ccsnoise(common_data)
 
-    output = liberty_dict("library", lib+"__"+corner, common_data, 0)
+    output = liberty_dict("library", lib+"__"+corner, common_data)
     assert output[-1] == '}', output
     top_write(output[:-1])
 
@@ -318,7 +336,7 @@ def generate(library_dir, lib, corner, ocorner_type, icorner_type, cells):
             remove_ccsnoise(cell_data)
 
         top_write([''])
-        top_write(liberty_dict("cell", "%s__%s" % (lib, cell_with_size), cell_data, 1))
+        top_write(liberty_dict("cell", "%s__%s" % (lib, cell_with_size), cell_data, [cell_with_size]))
 
     top_write([''])
     top_write(['}'])
@@ -407,16 +425,16 @@ def liberty_float(f):
     return s
 
 
-def liberty_composite(i, k, v):
+def liberty_composite(k, v, i=tuple()):
     """
 
     >>> def pl(l):
     ...     print("\\n".join(l))
 
-    >>> pl(liberty_composite(0, "capacitive_load_unit", [1.0, "pf"]))
+    >>> pl(liberty_composite("capacitive_load_unit", [1.0, "pf"], []))
     capacitive_load_unit(1.0000000000, "pf");
 
-    >>> pl(liberty_composite(0, "voltage_map", [("vpwr", 1.95), ("vss", 0.0)]))
+    >>> pl(liberty_composite("voltage_map", [("vpwr", 1.95), ("vss", 0.0)], []))
     voltage_map("vpwr", 1.9500000000);
     voltage_map("vss", 0.0000000000);
 
@@ -427,8 +445,8 @@ def liberty_composite(i, k, v):
 
     if isinstance(v[0], (list, tuple)):
         o = []
-        for l in v:
-            o.extend(liberty_composite(i, k, l))
+        for j, l in enumerate(v):
+            o.extend(liberty_composite(k, l, i))
         return o
 
     o = []
@@ -441,7 +459,7 @@ def liberty_composite(i, k, v):
         else:
             raise ValueError("%s - %r (%r)" % (k, l, v))
 
-    return ["%s%s(%s);" % (INDENT*i, k, ", ".join(o))]
+    return ["%s%s(%s);" % (INDENT*len(i), k, ", ".join(o))]
 
 
 def liberty_join(l):
@@ -479,13 +497,13 @@ def liberty_join(l):
     raise ValueError("Invalid value: %r" % types(l))
 
 
-def liberty_list(i, k, v):
+def liberty_list(k, v, i=tuple()):
     o = []
     if isinstance(v[0], list):
-        o.append('%s%s(' % (INDENT*i, k))
+        o.append('%s%s(' % (INDENT*len(i), k))
         join = liberty_join(v[0])
         for l in v:
-            o.append('%s"%s", \\' % (INDENT*(i+1), join(l)))
+            o.append('%s"%s", \\' % (INDENT*(len(i)+1), join(l)))
 
         o[1] = o[0]+o[1]
         o.pop(0)
@@ -493,24 +511,24 @@ def liberty_list(i, k, v):
         o[-1] = o[-1][:-3] + ');'
     else:
         join = liberty_join(v)
-        o.append('%s%s("%s");' % (INDENT*i, k, join(v)))
+        o.append('%s%s("%s");' % (INDENT*len(i), k, join(v)))
 
     return o
 
 
-def liberty_dict(dtype, dvalue, data, i=0):
+def liberty_dict(dtype, dvalue, data, i=tuple()):
     assert isinstance(data, dict), (dtype, dvalue, data)
     o = []
     if dvalue:
         dvalue = '"%s"' % dvalue
-    o.append('%s%s (%s) {' % (INDENT*i, dtype, dvalue))
+    o.append('%s%s (%s) {' % (INDENT*len(i), dtype, dvalue))
 
-    i_n = i+1
+    i_n = list(i)+[(dtype, dvalue)]
 
     # Output the attribute defines first
     if 'define' in data:
         for d in sorted(data['define'], key=lambda d: d['group_name']+'.'+d['attribute_name']):
-            o.append('%sdefine(%s,%s,%s);' % (INDENT*i_n, d['attribute_name'], d['group_name'], d['attribute_type']))
+            o.append('%sdefine(%s,%s,%s);' % (INDENT*len(i_n), d['attribute_name'], d['group_name'], d['attribute_type']))
         o.append('')
 
         del data['define']
@@ -542,7 +560,7 @@ def liberty_dict(dtype, dvalue, data, i=0):
 
         if ktype == "comp_attribute":
             assert isinstance(v, list), (k, v)
-            o.extend(liberty_composite(i_n, kvalue, v))
+            o.extend(liberty_composite(kvalue, v, i_n))
 
         elif isinstance(v, dict):
             assert isinstance(v, dict), (dtype, dvalue, k, v)
@@ -558,18 +576,22 @@ def liberty_dict(dtype, dvalue, data, i=0):
                     o.extend(liberty_dict(ktype, kvalue, l, i_n))
 
             elif is_liberty_list(k):
-                o.extend(liberty_list(i_n, k, v))
+                o.extend(liberty_list(k, v, i_n))
+
+            elif "clk_width" == k:
+                for l in sorted(v):
+                    o.append("%s%s : %s;" % (INDENT*len(i_n), k, l))
 
             else:
-                raise ValueError("Unknown %s: %r" % (k, v))
+                raise ValueError("Unknown %s: %r\n%s" % (k, v, i_n))
         else:
             if isinstance(v, str):
                 v = '"%s"' % v
             elif isinstance(v, (float,int)):
                 v = liberty_float(v)
-            o.append("%s%s : %s;" % (INDENT*i_n, k, v))
+            o.append("%s%s : %s;" % (INDENT*len(i_n), k, v))
 
-    o.append("%s}" % (INDENT*i))
+    o.append("%s}" % (INDENT*len(i)))
     return o
 
 
@@ -605,7 +627,7 @@ def main():
 
     retcode = 0
 
-    lib, corners, cells = collect(libdir)
+    lib, corners, all_cells = collect(libdir)
 
     if args.ccsnoise:
         output_corner_type = TimingType.ccsnoise
@@ -615,7 +637,7 @@ def main():
         output_corner_type = TimingType.basic
 
     if args.corner == ['all']:
-        args.corner = list(sorted(k for k, v in corners.items() if output_corner_type in v))
+        args.corner = list(sorted(k for k, (v0, v1) in corners.items() if output_corner_type in v0))
 
     if args.corner:
         for acorner in args.corner:
@@ -631,12 +653,12 @@ def main():
         print()
         print("Available corners:")
         for k, v in sorted(corners.items()):
-            print("  -", k, v.describe())
+            print("  -", k, v[0].describe())
         print()
         return retcode
 
     for corner in args.corner:
-        input_corner_type = corners[corner]
+        input_corner_type, corner_cells = corners[corner]
         if output_corner_type not in input_corner_type:
             print("Corner", corner, "doesn't support", output_corner_type, "(only {})".format(input_corner_type))
             return 1
@@ -649,7 +671,7 @@ def main():
         generate(
             libdir, lib,
             corner, output_corner_type, input_corner_type,
-            cells,
+            corner_cells,
         )
     return 0
 
