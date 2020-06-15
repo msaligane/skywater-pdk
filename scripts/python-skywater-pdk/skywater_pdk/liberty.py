@@ -57,6 +57,12 @@ class TimingType(enum.IntFlag):
     '(with power leakage)'
     >>> (TimingType.leakage | TimingType.ccsnoise).describe()
     '(with ccsnoise and power leakage)'
+
+    >>> (TimingType.leakage | TimingType.ccsnoise).names()
+    'basic, ccsnoise, leakage'
+
+    >>> TimingType.ccsnoise.names()
+    'basic, ccsnoise'
     """
 
     basic    = 1
@@ -67,6 +73,13 @@ class TimingType(enum.IntFlag):
 
     # leakage files are separate from the basic files
     leakage  = 4
+
+    def names(self):
+        o = []
+        for t in TimingType:
+            if t in self:
+                o.append(t.name)
+        return ", ".join(o)
 
     def describe(self):
         o = []
@@ -253,15 +266,16 @@ def remove_ccsnoise(data):
 
 
 
-def generate(library_dir, lib, corner, corner_type, cells):
-    top_fname = top_corner_file(lib, corner, corner_type).replace('.lib.json', '.lib')
+def generate(library_dir, lib, corner, ocorner_type, icorner_type, cells):
+    top_fname = top_corner_file(lib, corner, ocorner_type).replace('.lib.json', '.lib')
     top_fpath = os.path.join(library_dir, top_fname)
 
     top_fout = open(top_fpath, "w")
     def top_write(lines):
         print("\n".join(lines), file=top_fout)
 
-    print("Starting to write", top_fpath, flush=True)
+    otype_str = "({} from {})".format(ocorner_type.name, icorner_type.names())
+    print("Starting to write", top_fpath, otype_str, flush=True)
 
     common_data = {}
 
@@ -274,7 +288,7 @@ def generate(library_dir, lib, corner, corner_type, cells):
             assert k not in common_data, (k, common_data[k])
             common_data[k] = v
 
-    top_data_path = os.path.join(library_dir, top_corner_file(lib, corner, corner_type))
+    top_data_path = os.path.join(library_dir, top_corner_file(lib, corner, icorner_type))
     assert os.path.exists(top_data_path), top_data_path
     with open(top_data_path) as f:
         d = json.load(f)
@@ -284,7 +298,7 @@ def generate(library_dir, lib, corner, corner_type, cells):
             common_data[k] = v
 
     # Remove the ccsnoise if it exists
-    if corner_type != TimingType.ccsnoise:
+    if ocorner_type != TimingType.ccsnoise:
         remove_ccsnoise(common_data)
 
     output = liberty_dict("library", lib+"__"+corner, common_data, 0)
@@ -292,7 +306,7 @@ def generate(library_dir, lib, corner, corner_type, cells):
     top_write(output[:-1])
 
     for cell_with_size in cells:
-        fname = cell_corner_file(lib, cell_with_size, corner, corner_type)
+        fname = cell_corner_file(lib, cell_with_size, corner, icorner_type)
         fpath = os.path.join(library_dir, fname)
         assert os.path.exists(fpath), fpath
 
@@ -300,7 +314,7 @@ def generate(library_dir, lib, corner, corner_type, cells):
             cell_data = json.load(f)
 
         # Remove the ccsnoise if it exists
-        if corner_type != TimingType.ccsnoise:
+        if ocorner_type != TimingType.ccsnoise:
             remove_ccsnoise(cell_data)
 
         top_write([''])
@@ -310,6 +324,7 @@ def generate(library_dir, lib, corner, corner_type, cells):
     top_write(['}'])
     top_fout.close()
     print("   Finish writing", top_fpath, flush=True)
+    print("")
 
 
 INDENT="    "
@@ -621,14 +636,19 @@ def main():
         return retcode
 
     for corner in args.corner:
-        corner_type = corners[corner]
-        if output_corner_type not in corner_type:
-            print("Corner", corner, "doesn't support", output_corner_type)
+        input_corner_type = corners[corner]
+        if output_corner_type not in input_corner_type:
+            print("Corner", corner, "doesn't support", output_corner_type, "(only {})".format(input_corner_type))
             return 1
+
+        if output_corner_type == TimingType.basic and TimingType.ccsnoise in input_corner_type:
+            input_corner_type = TimingType.ccsnoise
+        else:
+            input_corner_type = output_corner_type
 
         generate(
             libdir, lib,
-            corner, output_corner_type,
+            corner, output_corner_type, input_corner_type,
             cells,
         )
     return 0

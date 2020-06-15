@@ -64,6 +64,7 @@ LIBRARIES = $(notdir $(wildcard skywater-pdk/libraries/*))
 
 $(LIBRARIES): | $(CONDA_ENV_PYTHON)
 	@$(IN_CONDA_ENV) for V in skywater-pdk/libraries/$@/*; do \
+		python -m skywater_pdk.liberty $$V; \
 		python -m skywater_pdk.liberty $$V all; \
 		python -m skywater_pdk.liberty $$V all --ccsnoise; \
 	done
