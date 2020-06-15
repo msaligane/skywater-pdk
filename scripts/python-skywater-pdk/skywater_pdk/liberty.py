@@ -657,6 +657,8 @@ def main():
         print()
         return retcode
 
+    print("Generating", output_corner_type.name, "liberty timing files for", lib, "at", ", ".join(args.corner))
+    print()
     for corner in args.corner:
         input_corner_type, corner_cells = corners[corner]
         if output_corner_type not in input_corner_type:
