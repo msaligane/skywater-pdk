@@ -651,7 +651,7 @@ def main():
 
     if not args.corner:
         print()
-        print("Available corners:")
+        print("Available corners for", lib+":")
         for k, v in sorted(corners.items()):
             print("  -", k, v[0].describe())
         print()
