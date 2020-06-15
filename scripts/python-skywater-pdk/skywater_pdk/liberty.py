@@ -630,9 +630,9 @@ def main():
     if not args.corner:
         print()
         print("Available corners:")
-
         for k, v in sorted(corners.items()):
             print("  -", k, v.describe())
+        print()
         return retcode
 
     for corner in args.corner:
