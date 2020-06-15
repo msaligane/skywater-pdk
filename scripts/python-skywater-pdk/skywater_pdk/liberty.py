@@ -49,8 +49,14 @@ class TimingType(enum.IntFlag):
     >>> TimingType.parse("ff_100C_1v65_pwrlkg")
     ('ff_100C_1v65', <TimingType.leakage: 4>)
 
-    >>> TimingType.basic in TimingType.leakage
-    False
+    >>> (TimingType.basic).describe()
+    ''
+    >>> (TimingType.ccsnoise).describe()
+    '(with ccsnoise)'
+    >>> (TimingType.leakage).describe()
+    '(with power leakage)'
+    >>> (TimingType.leakage | TimingType.ccsnoise).describe()
+    '(with ccsnoise and power leakage)'
     """
 
     basic    = 1
@@ -63,11 +69,14 @@ class TimingType(enum.IntFlag):
     leakage  = 4
 
     def describe(self):
-        if self == TimingType.ccsnoise:
-            return "(with ccsnoise)"
-        elif self == TimingType.leakage:
-            return "(with power leakage)"
-        return ""
+        o = []
+        if TimingType.ccsnoise in self:
+            o.append("ccsnoise")
+        if TimingType.leakage in self:
+            o.append("power leakage")
+        if not o:
+            return ""
+        return "(with "+" and ".join(o)+")"
 
     @property
     def file(self):
@@ -88,6 +97,18 @@ class TimingType(enum.IntFlag):
             ttype = TimingType.leakage
         return name, ttype
 
+    @property
+    def singular(self):
+        return len(self.types) == 1
+
+    @property
+    def types(self):
+        tt = set(t for t in TimingType if t in self)
+        if TimingType.ccsnoise in tt:
+            tt.remove(TimingType.basic)
+        return list(tt)
+
+
 
 def cell_corner_file(lib, cell_with_size, corner, corner_type: TimingType):
     """
@@ -100,6 +121,8 @@ def cell_corner_file(lib, cell_with_size, corner, corner_type: TimingType):
     'cells/a2111o/sky130_fd_sc_hd__a2111o_1__ff_100C_1v65_ccsnoise.lib.json'
 
     """
+    assert corner_type.singular, (lib, cell_with_size, corner, corner_type, corner_type.types())
+
     sz = sizes.parse_size(cell_with_size)
     if sz:
         cell = cell_with_size[:-len(sz.suffix)]
@@ -120,6 +143,7 @@ def top_corner_file(libname, corner, corner_type: TimingType):
     'timing/sky130_fd_sc_hd__ff_100C_1v65.lib.json'
 
     """
+    assert corner_type.singular, (libname, corner, corner_type, corner_type.types())
     return "timing/{libname}__{corner}{corner_type}.lib.json".format(
         libname=libname,
         corner=corner, corner_type=corner_type.file)
@@ -170,13 +194,9 @@ def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
         cells.add(cellname)
 
         if corner_name in corners:
-            if corner_type == TimingType.basic:
-                continue
-            if corner_type == corners[corner_name]:
-                continue
-            assert corners[corner_name] == TimingType.basic, (corner, corners[corner_name], corner_type)
-
-        corners[corner_name] = corner_type
+            corners[corner_name] |= corner_type
+        else:
+            corners[corner_name] = corner_type
 
     assert corners, library_dir
     assert cells, library_dir
@@ -186,17 +206,19 @@ def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
 
     # Sanity check to make sure the corner exists for all cells.
     for cell_with_size in cells:
-        for corner in sorted(corners):
-            fname = cell_corner_file(libname0, cell_with_size, corner, corners[corner])
-            fpath = os.path.join(library_dir, fname)
-            assert os.path.exists(fpath), fpath
+        for corner, corner_types in sorted(corners.items()):
+            for corner_type in corner_types.types:
+                fname = cell_corner_file(libname0, cell_with_size, corner, corner_type)
+                fpath = os.path.join(library_dir, fname)
+                assert os.path.exists(fpath), (fpath, corner, corner_type, corner_types)
 
     timing_dir = os.path.join(library_dir, "timing")
     assert os.path.exists(timing_dir), timing_dir
-    for corner, corner_type in corners.items():
-        fname = top_corner_file(libname0, corner, corner_type)
-        fpath = os.path.join(library_dir, fname)
-        assert os.path.exists(fpath), (fpath, corner, corner_type)
+    for corner, corner_types in sorted(corners.items()):
+        for corner_type in corner_types.types:
+            fname = top_corner_file(libname0, corner, corner_type)
+            fpath = os.path.join(library_dir, fname)
+            assert os.path.exists(fpath), (fpath, corner, corner_type, corner_types)
 
     return libname0, corners, cells
 
@@ -231,12 +253,8 @@ def remove_ccsnoise(data):
 
 
 
-def generate(library_dir, lib, corner, corner_type, cells, ccsnoise=False, leakage=False):
-    if not ccsnoise and corner_type == TimingType.ccsnoise:
-        ocorner_type = TimingType.basic
-    else:
-        ocorner_type = corner_type
-    top_fname = top_corner_file(lib, corner, ocorner_type).replace('.lib.json', '.lib')
+def generate(library_dir, lib, corner, corner_type, cells):
+    top_fname = top_corner_file(lib, corner, corner_type).replace('.lib.json', '.lib')
     top_fpath = os.path.join(library_dir, top_fname)
 
     top_fout = open(top_fpath, "w")
@@ -266,7 +284,7 @@ def generate(library_dir, lib, corner, corner_type, cells, ccsnoise=False, leaka
             common_data[k] = v
 
     # Remove the ccsnoise if it exists
-    if not ccsnoise:
+    if corner_type != TimingType.ccsnoise:
         remove_ccsnoise(common_data)
 
     output = liberty_dict("library", lib+"__"+corner, common_data, 0)
@@ -282,7 +300,7 @@ def generate(library_dir, lib, corner, corner_type, cells, ccsnoise=False, leaka
             cell_data = json.load(f)
 
         # Remove the ccsnoise if it exists
-        if not ccsnoise:
+        if corner_type != TimingType.ccsnoise:
             remove_ccsnoise(cell_data)
 
         top_write([''])
@@ -574,8 +592,15 @@ def main():
 
     lib, corners, cells = collect(libdir)
 
+    if args.ccsnoise:
+        output_corner_type = TimingType.ccsnoise
+    elif args.leakage:
+        output_corner_type = TimingType.leakage
+    else:
+        output_corner_type = TimingType.basic
+
     if args.corner == ['all']:
-        args.corner = list(sorted(corners))
+        args.corner = list(sorted(k for k, v in corners.items() if output_corner_type in v))
 
     if args.corner:
         for acorner in args.corner:
@@ -597,18 +622,14 @@ def main():
 
     for corner in args.corner:
         corner_type = corners[corner]
-        if args.ccsnoise and corner_type != TimingType.ccsnoise:
-            print("Corner", corner, "doesn't support ccsnoise.")
-            return 1
-        if args.leakage and corner_type != TimingType.leakage:
-            print("Corner", corner, "doesn't support power leakage.")
+        if output_corner_type not in corner_type:
+            print("Corner", corner, "doesn't support", output_corner_type)
             return 1
 
         generate(
             libdir, lib,
-            corner, corner_type,
+            corner, output_corner_type,
             cells,
-            ccsnoise=args.ccsnoise, leakage=args.leakage,
         )
     return 0
 
