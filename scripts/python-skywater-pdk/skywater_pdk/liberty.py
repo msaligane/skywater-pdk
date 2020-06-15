@@ -24,7 +24,10 @@ import json
 import os
 import pathlib
 import pprint
+import re
 import sys
+
+from collections import defaultdict
 
 from typing import Tuple, List, Dict
 
@@ -86,7 +89,17 @@ class TimingType(enum.IntFlag):
         return name, ttype
 
 
-def corner_file(lib, cell_with_size, corner, corner_type: TimingType):
+def cell_corner_file(lib, cell_with_size, corner, corner_type: TimingType):
+    """
+
+    >>> cell_corner_file("sky130_fd_sc_hd", "a2111o", "ff_100C_1v65", TimingType.basic)
+    'cells/a2111o/sky130_fd_sc_hd__a2111o__ff_100C_1v65.lib.json'
+    >>> cell_corner_file("sky130_fd_sc_hd", "a2111o_1", "ff_100C_1v65", TimingType.basic)
+    'cells/a2111o/sky130_fd_sc_hd__a2111o_1__ff_100C_1v65.lib.json'
+    >>> cell_corner_file("sky130_fd_sc_hd", "a2111o_1", "ff_100C_1v65", TimingType.ccsnoise)
+    'cells/a2111o/sky130_fd_sc_hd__a2111o_1__ff_100C_1v65_ccsnoise.lib.json'
+
+    """
     sz = sizes.parse_size(cell_with_size)
     if sz:
         cell = cell_with_size[:-len(sz.suffix)]
@@ -96,6 +109,20 @@ def corner_file(lib, cell_with_size, corner, corner_type: TimingType):
     fname = "cells/{cell}/{lib}__{cell_sz}__{corner}{corner_type}.lib.json".format(
         lib=lib, cell=cell, cell_sz=cell_with_size, corner=corner, corner_type=corner_type.file)
     return fname
+
+
+def top_corner_file(libname, corner, corner_type: TimingType):
+    """
+
+    >>> top_corner_file("sky130_fd_sc_hd", "ff_100C_1v65", TimingType.ccsnoise)
+    'timing/sky130_fd_sc_hd__ff_100C_1v65_ccsnoise.lib.json'
+    >>> top_corner_file("sky130_fd_sc_hd", "ff_100C_1v65", TimingType.basic)
+    'timing/sky130_fd_sc_hd__ff_100C_1v65.lib.json'
+
+    """
+    return "timing/{libname}__{corner}{corner_type}.lib.json".format(
+        libname=libname,
+        corner=corner, corner_type=corner_type.file)
 
 
 def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
@@ -128,6 +155,8 @@ def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
     for p in library_dir.rglob("*.lib.json"):
         if not p.is_file():
             continue
+        if "timing" in str(p):
+            continue
 
         fname, fext = str(p.name).split('.', 1)
 
@@ -158,63 +187,282 @@ def collect(library_dir) -> Tuple[Dict[str, TimingType], List[str]]:
     # Sanity check to make sure the corner exists for all cells.
     for cell_with_size in cells:
         for corner in sorted(corners):
-            fname = corner_file(libname0, cell_with_size, corner, corners[corner])
+            fname = cell_corner_file(libname0, cell_with_size, corner, corners[corner])
             fpath = os.path.join(library_dir, fname)
             assert os.path.exists(fpath), fpath
+
+    timing_dir = os.path.join(library_dir, "timing")
+    assert os.path.exists(timing_dir), timing_dir
+    for corner, corner_type in corners.items():
+        fname = top_corner_file(libname0, corner, corner_type)
+        fpath = os.path.join(library_dir, fname)
+        assert os.path.exists(fpath), (fpath, corner, corner_type)
 
     return libname0, corners, cells
 
 
-def generate(output_path, library_dir, lib, corner, corner_type, cells, ccsnoise=False, leakage=False):
+def remove_ccsnoise(data):
+    for k, v in list(data.items()):
+        if "ccsn_" in k:
+            del data[k]
+            continue
 
-    output = []
+        if not k.startswith("pin "):
+            continue
+
+        pin_data = data[k]
+
+        if "input_voltage" in pin_data:
+            del pin_data["input_voltage"]
+
+        if "timing" not in pin_data:
+            continue
+        pin_timing = pin_data["timing"]
+
+        for t in pin_timing:
+            ccsn_keys = set()
+            for k in t:
+                if not k.startswith("ccsn_"):
+                    continue
+                ccsn_keys.add(k)
+
+            for k in ccsn_keys:
+                del t[k]
+
+
+
+def generate(library_dir, lib, corner, corner_type, cells, ccsnoise=False, leakage=False):
+    if not ccsnoise and corner_type == TimingType.ccsnoise:
+        ocorner_type = TimingType.basic
+    else:
+        ocorner_type = corner_type
+    top_fname = top_corner_file(lib, corner, ocorner_type).replace('.lib.json', '.lib')
+    top_fpath = os.path.join(library_dir, top_fname)
+
+    top_fout = open(top_fpath, "w")
+    def top_write(lines):
+        print("\n".join(lines), file=top_fout)
+
+    print("Starting to write", top_fpath, flush=True)
+
+    common_data = {}
+
+    common_data_path = os.path.join(library_dir, "timing", "{}__common.lib.json".format(lib))
+    assert os.path.exists(common_data_path), common_data_path
+    with open(common_data_path) as f:
+        d = json.load(f)
+        assert isinstance(d, dict)
+        for k, v in d.items():
+            assert k not in common_data, (k, common_data[k])
+            common_data[k] = v
+
+    top_data_path = os.path.join(library_dir, top_corner_file(lib, corner, corner_type))
+    assert os.path.exists(top_data_path), top_data_path
+    with open(top_data_path) as f:
+        d = json.load(f)
+        assert isinstance(d, dict)
+        for k, v in d.items():
+            assert k not in common_data, (k, common_data[k])
+            common_data[k] = v
+
+    # Remove the ccsnoise if it exists
+    if not ccsnoise:
+        remove_ccsnoise(common_data)
+
+    output = liberty_dict("library", lib+"__"+corner, common_data, 0)
+    assert output[-1] == '}', output
+    top_write(output[:-1])
+
     for cell_with_size in cells:
-        fname = corner_file(lib, cell_with_size, corner, corner_type)
+        fname = cell_corner_file(lib, cell_with_size, corner, corner_type)
         fpath = os.path.join(library_dir, fname)
         assert os.path.exists(fpath), fpath
 
-        print(fpath)
         with open(fpath) as f:
             cell_data = json.load(f)
 
         # Remove the ccsnoise if it exists
         if not ccsnoise:
-            for k, v in cell_data.items():
-                if not k.startswith("pin "):
-                    continue
+            remove_ccsnoise(cell_data)
 
-                pin_data = cell_data[k]
+        top_write([''])
+        top_write(liberty_dict("cell", "%s__%s" % (lib, cell_with_size), cell_data, 1))
 
-                if "input_voltage" in pin_data:
-                    del pin_data["input_voltage"]
-
-                if "timing" not in pin_data:
-                    continue
-                pin_timing = cell_data[k]["timing"]
-
-                for t in pin_timing:
-                    ccsn_keys = set()
-                    for k in t:
-                        if not k.startswith("ccsn_"):
-                            continue
-                        ccsn_keys.add(k)
-
-                    for k in ccsn_keys:
-                        del t[k]
-
-        output.extend(liberty_dict("cell", "%s__%s" % (lib, cell_with_size), cell_data, 1))
-        break
-    print("\n".join(output))
-
+    top_write([''])
+    top_write(['}'])
+    top_fout.close()
+    print("   Finish writing", top_fpath, flush=True)
 
 
 INDENT="    "
 
 # complex attribute -- (x,b)
 
+RE_LIBERTY_LIST = re.compile("(.*)_([0-9]+)")
 
-def liberty_list(l):
-    return ", ".join("%f" % f for f in l)
+def liberty_sort(k):
+    """
+
+    >>> liberty_sort("variable_1")
+    (1, 'variable')
+    >>> liberty_sort("index_3")
+    (3, 'index')
+    >>> liberty_sort("values") # doctest: +ELLIPSIS
+    (inf, 'values')
+
+    """
+    m = RE_LIBERTY_LIST.match(k)
+    if m:
+        k, n = m.group(1), m.group(2)
+        n = int(n)
+    else:
+        n = float('inf')
+    return n, k
+
+
+def is_liberty_list(k):
+    """
+
+    >>> is_liberty_list("variable_1")
+    True
+    >>> is_liberty_list("index_3")
+    True
+    >>> is_liberty_list("values")
+    True
+    """
+    m = RE_LIBERTY_LIST.match(k)
+    if m:
+        k, n = m.group(1), m.group(2)
+
+    return k in ('variable', 'index', 'values')
+
+
+def liberty_float(f):
+    """
+
+    >>> liberty_float(1.9208818e-02)
+    '0.0192088180'
+
+    >>> liberty_float(1.5)
+    '1.5000000000'
+
+    >>> liberty_float(1e20)
+    '1.000000e+20'
+
+    >>> liberty_float(1)
+    '1.0000000000'
+
+    """
+    WIDTH = len(str(0.0083333333))
+
+    s = json.dumps(f)
+    if 'e' in s:
+        a, b = s.split('e')
+        if '.' not in a:
+            a += '.'
+        while len(a)+len(b)+1 < WIDTH:
+            a += '0'
+        s = "%se%s" % (a, b)
+    elif '.' in s:
+        while len(s) < WIDTH:
+            s += '0'
+    else:
+        if len(s) < WIDTH:
+            s += '.'
+        while len(s) < WIDTH:
+            s += '0'
+    return s
+
+
+def liberty_composite(i, k, v):
+    """
+
+    >>> def pl(l):
+    ...     print("\\n".join(l))
+
+    >>> pl(liberty_composite(0, "capacitive_load_unit", [1.0, "pf"]))
+    capacitive_load_unit(1.0000000000, "pf");
+
+    >>> pl(liberty_composite(0, "voltage_map", [("vpwr", 1.95), ("vss", 0.0)]))
+    voltage_map("vpwr", 1.9500000000);
+    voltage_map("vss", 0.0000000000);
+
+    """
+    if isinstance(v, tuple):
+        v = list(v)
+    assert isinstance(v, list), (k, v)
+
+    if isinstance(v[0], (list, tuple)):
+        o = []
+        for l in v:
+            o.extend(liberty_composite(i, k, l))
+        return o
+
+    o = []
+    for l in v:
+        if isinstance(l, (float, int)):
+            o.append(liberty_float(l))
+        elif isinstance(l, str):
+            assert '"' not in l, (k, v)
+            o.append('"%s"' % l)
+        else:
+            raise ValueError("%s - %r (%r)" % (k, l, v))
+
+    return ["%s%s(%s);" % (INDENT*i, k, ", ".join(o))]
+
+
+def liberty_join(l):
+    """
+
+    >>> l = [5, 1.0, 10]
+    >>> liberty_join(l)(l)
+    '5.0000000000, 1.0000000000, 10.000000000'
+
+    >>> l = [1, 5, 8]
+    >>> liberty_join(l)(l)
+    '1, 5, 8'
+
+    """
+    d = defaultdict(lambda: 0)
+
+    for i in l:
+        d[type(i)] += 1
+
+    def types(l):
+        return [(i, type(i)) for i in l]
+
+    if d[float] > 0:
+        assert (d[float]+d[int]) == len(l), (d, types(l))
+        def join(l):
+            return ", ".join(liberty_float(f) for f in l)
+        return join
+
+    elif d[int] > 0:
+        assert d[int] == len(l), (d, types(l))
+        def join(l):
+            return ", ".join(str(f) for f in l)
+        return join
+
+    raise ValueError("Invalid value: %r" % types(l))
+
+
+def liberty_list(i, k, v):
+    o = []
+    if isinstance(v[0], list):
+        o.append('%s%s(' % (INDENT*i, k))
+        join = liberty_join(v[0])
+        for l in v:
+            o.append('%s"%s", \\' % (INDENT*(i+1), join(l)))
+
+        o[1] = o[0]+o[1]
+        o.pop(0)
+
+        o[-1] = o[-1][:-3] + ');'
+    else:
+        join = liberty_join(v)
+        o.append('%s%s("%s");' % (INDENT*i, k, join(v)))
+
+    return o
 
 
 def liberty_dict(dtype, dvalue, data, i=0):
@@ -223,8 +471,35 @@ def liberty_dict(dtype, dvalue, data, i=0):
     if dvalue:
         dvalue = '"%s"' % dvalue
     o.append('%s%s (%s) {' % (INDENT*i, dtype, dvalue))
+
     i_n = i+1
-    for k, v in sorted(data.items()):
+
+    # Output the attribute defines first
+    if 'define' in data:
+        for d in sorted(data['define'], key=lambda d: d['group_name']+'.'+d['attribute_name']):
+            o.append('%sdefine(%s,%s,%s);' % (INDENT*i_n, d['attribute_name'], d['group_name'], d['attribute_type']))
+        o.append('')
+
+        del data['define']
+
+    # Output all the attributes
+    def attr_sort_key(a):
+        k, v = a
+        if " " in k:
+            ktype, kvalue = k.split(" ", 1)
+        else:
+            ktype = k
+            kvalue = ""
+
+        if ktype == "comp_attribute":
+            ktype = kvalue
+            kvalue = None
+
+        kn, ktype = liberty_sort(ktype)
+
+        return (kn, ktype, kvalue)
+
+    for k, v in sorted(data.items(), key=attr_sort_key):
 
         if " " in k:
             ktype, kvalue = k.split(" ", 1)
@@ -232,7 +507,11 @@ def liberty_dict(dtype, dvalue, data, i=0):
             ktype = k
             kvalue = ""
 
-        if isinstance(v, dict):
+        if ktype == "comp_attribute":
+            assert isinstance(v, list), (k, v)
+            o.extend(liberty_composite(i_n, kvalue, v))
+
+        elif isinstance(v, dict):
             assert isinstance(v, dict), (dtype, dvalue, k, v)
             o.extend(liberty_dict(ktype, kvalue, v, i_n))
 
@@ -244,47 +523,23 @@ def liberty_dict(dtype, dvalue, data, i=0):
 
                 for l in sorted(v, key=k):
                     o.extend(liberty_dict(ktype, kvalue, l, i_n))
-            elif isinstance(v[0], list):
-                o.append('%s%s(' % (INDENT*i_n, k))
-                for l in v:
-                    o.append('%s"%s", \\' % (INDENT*(i_n+1), liberty_list(l)))
-                o[-1] = o[-1][:-3] + ');'
+
+            elif is_liberty_list(k):
+                o.extend(liberty_list(i_n, k, v))
+
             else:
-                o.append('%s%s("%s");' % (INDENT*i_n, k, liberty_list(v)))
+                raise ValueError("Unknown %s: %r" % (k, v))
         else:
             if isinstance(v, str):
                 v = '"%s"' % v
+            elif isinstance(v, (float,int)):
+                v = liberty_float(v)
             o.append("%s%s : %s;" % (INDENT*i_n, k, v))
 
     o.append("%s}" % (INDENT*i))
     return o
 
 
-
-def liberty(data, i=0):
-    if isinstance(data, dict):
-        return liberty_dict
-        o = []
-        for k, v in data.items():
-            if " " in k:
-                ktype, kvalue = k.split(" ", 1)
-                o.append("%s%s (%s) {" % (" "*i, ktype, kvalue))
-                o.extend(liberty(data, i+1))
-                o.append("%s}" % (" "*i))
-                continue
-
-            assert not isinstance(v, dict), (repr(k), repr(v))
-            if isinstance(v, list):
-                if isinstance(v[0], dict):
-
-                    vs = str(v)
-            else:
-                vs = ": %s" % v
-
-            o.append("%s%s %s;" % (" "*i, k, vs))
-        return o
-    elif isinstance(data, list):
-        o = []
 
 
 def main():
@@ -318,6 +573,10 @@ def main():
     retcode = 0
 
     lib, corners, cells = collect(libdir)
+
+    if args.corner == ['all']:
+        args.corner = list(sorted(corners))
+
     if args.corner:
         for acorner in args.corner:
             if acorner in corners:
@@ -336,8 +595,6 @@ def main():
             print("  -", k, v.describe())
         return retcode
 
-    print(args)
-
     for corner in args.corner:
         corner_type = corners[corner]
         if args.ccsnoise and corner_type != TimingType.ccsnoise:
@@ -348,7 +605,6 @@ def main():
             return 1
 
         generate(
-            "{}__{}.lib".format(lib, corner),
             libdir, lib,
             corner, corner_type,
             cells,
