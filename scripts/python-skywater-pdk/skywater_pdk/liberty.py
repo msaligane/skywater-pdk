@@ -521,7 +521,12 @@ def liberty_dict(dtype, dvalue, data, i=tuple()):
     o = []
     if dvalue:
         dbits = dvalue.split(",")
-        dvalue = ','.join('"%s"' % d for d in dvalue)
+        for j, d in enumerate(dbits):
+            if '"' in d:
+                assert d.startswith('"'), dbits
+                assert d.endswith('"'), dbits
+                dbits[j] = d[1:-1]
+        dvalue = ','.join('"%s"' % d for d in dbits)
     o.append('%s%s (%s) {' % (INDENT*len(i), dtype, dvalue))
 
     i_n = list(i)+[(dtype, dvalue)]
