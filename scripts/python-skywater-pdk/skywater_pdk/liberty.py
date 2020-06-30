@@ -312,7 +312,8 @@ def generate(library_dir, lib, corner, ocorner_type, icorner_type, cells):
         d = json.load(f)
         assert isinstance(d, dict)
         for k, v in d.items():
-            assert k not in common_data, (k, common_data[k])
+            if k in common_data:
+                print("Overwriting", k, "with", v, "(existing value of", common_data[k], ")")
             common_data[k] = v
 
     # Remove the ccsnoise if it exists
@@ -438,10 +439,15 @@ def liberty_composite(k, v, i=tuple()):
     voltage_map("vpwr", 1.9500000000);
     voltage_map("vss", 0.0000000000);
 
+    >>> pl(liberty_composite("library_features", 'report_delay_calculation', []))
+    library_features("report_delay_calculation");
+
     """
     if isinstance(v, tuple):
         v = list(v)
-    assert isinstance(v, list), (k, v)
+    if not isinstance(v, list):
+        v = [v]
+    #assert isinstance(v, list), (k, v)
 
     if isinstance(v[0], (list, tuple)):
         o = []
@@ -523,8 +529,8 @@ def liberty_dict(dtype, dvalue, data, i=tuple()):
         dbits = dvalue.split(",")
         for j, d in enumerate(dbits):
             if '"' in d:
-                assert d.startswith('"'), dbits
-                assert d.endswith('"'), dbits
+                assert d.startswith('"'), (dvalue, dbits, i)
+                assert d.endswith('"'), (dvalue, dbits, i)
                 dbits[j] = d[1:-1]
         dvalue = ','.join('"%s"' % d for d in dbits)
     o.append('%s%s (%s) {' % (INDENT*len(i), dtype, dvalue))
@@ -565,7 +571,6 @@ def liberty_dict(dtype, dvalue, data, i=tuple()):
             kvalue = ""
 
         if ktype == "comp_attribute":
-            assert isinstance(v, list), (k, v)
             o.extend(liberty_composite(kvalue, v, i_n))
 
         elif isinstance(v, dict):
