@@ -520,7 +520,8 @@ def liberty_dict(dtype, dvalue, data, i=tuple()):
     assert isinstance(data, dict), (dtype, dvalue, data)
     o = []
     if dvalue:
-        dvalue = '"%s"' % dvalue
+        dbits = dvalue.split(",")
+        dvalue = ','.join('"%s"' % d for d in dvalue)
     o.append('%s%s (%s) {' % (INDENT*len(i), dtype, dvalue))
 
     i_n = list(i)+[(dtype, dvalue)]
@@ -584,6 +585,7 @@ def liberty_dict(dtype, dvalue, data, i=tuple()):
 
             else:
                 raise ValueError("Unknown %s: %r\n%s" % (k, v, i_n))
+
         else:
             if isinstance(v, str):
                 v = '"%s"' % v
