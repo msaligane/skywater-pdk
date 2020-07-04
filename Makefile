@@ -79,5 +79,17 @@ sky130_fd_sc_ms: sky130_fd_sc_ms-leakage
 timing: $(LIBRARIES) | $(CONDA_ENV_PYTHON)
 	@true
 
+SUBLIBRARIES = $(wildcard libraries/sky130_*_sc_*/*)
+
+lef: $(CONDA_ENV_PYTHON)
+	@$(IN_CONDA_ENV) for V in $(SUBLIBRARIES); do \
+		mkdir -p $$V/lef; \
+		export CELL_LEFS=""; \
+		python -m skywater_pdk.createLefList --inputFolder $$V/; \
+		source $$V/lef/leflist.mk; \
+		python -m skywater_pdk.mergeLef --inputLef $$CELL_LEFS --outputLef $$V/lef/merged.lef; \
+	done
+
+
 
 .PHONY: all
